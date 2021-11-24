@@ -26,6 +26,16 @@
 #include <getopt.h>
 #endif
 
+#include "postgres_fe.h"
+#include "common/username.h"
+#include "common/logging.h"
+#include "fe_utils/cancel.h"
+#include "fe_utils/connect_utils.h"
+#include "fe_utils/option_utils.h"
+#include "fe_utils/query_utils.h"
+#include "fe_utils/simple_list.h"
+#include "fe_utils/string_utils.h"
+
 #include "libpq-fe.h"
 #include "libpq/pqsignal.h"
 
@@ -54,11 +64,11 @@ struct options
 	char	*username;
 
 	/* version number */
-	int		major;
-	int		minor;
+	int	major;
+	int	minor;
 
 	/* pid */
-	int		pid;
+	int	pid;
 
 	/* include leader and workers PIDs */
 	bool	includeleaderworkers;
@@ -75,28 +85,27 @@ struct options
 /*
  * Global variables
  */
-PGconn	   		       *conn;
-struct options	       *opts;
-extern char            *optarg;
+PGconn		*conn;
+struct options	*opts;
+extern char	*optarg;
 
 
 /*
  * Function prototypes
  */
-static void help(const char *progname);
+static void	help(const char *progname);
 void		get_opts(int, char **);
 #ifndef FE_MEMUTILS_H
-void	   *pg_malloc(size_t size);
-char	   *pg_strdup(const char *in);
+void		*pg_malloc(size_t size);
+char		*pg_strdup(const char *in);
 #endif
-PGconn	   *sql_conn(void);
 void		fetch_version(void);
 bool		backend_minimum_version(int major, int minor);
 void		build_env(void);
 bool		active_session(void);
 void		handle_current_query(void);
 void		drop_env(void);
-static void quit_properly(SIGNAL_ARGS);
+static void	quit_properly(SIGNAL_ARGS);
 
 
 /*
@@ -201,7 +210,8 @@ get_opts(int argc, char **argv)
 				break;
 
 			default:
-				errx(1, "Try \"%s --help\" for more information.\n", progname);
+				pg_log_error("Try \"%s --help\" for more information.\n", progname);
+				exit(EXIT_FAILURE);
 		}
 	}
 
@@ -212,7 +222,9 @@ get_opts(int argc, char **argv)
 	}
 	else
 	{
-		errx(1, "PID required.\nTry \"%s --help\" for more information.\n", progname);
+		pg_log_error("PID required.\n");
+		pg_log_info("Try \"%s --help\" for more information.\n", progname);
+		exit(EXIT_FAILURE);
 	}
 
 	/* set dbname if unset */
@@ -238,7 +250,7 @@ get_opts(int argc, char **argv)
 void *
 pg_malloc(size_t size)
 {
-	void       *tmp;
+	void	*tmp;
 
 	/* Avoid unportable behavior of malloc(0) */
 	if (size == 0)
@@ -246,7 +258,7 @@ pg_malloc(size_t size)
 	tmp = malloc(size);
 	if (!tmp)
 	{
-		fprintf(stderr, "out of memory\n");
+		pg_log_error("out of memory (pg_malloc)\n");
 		exit(EXIT_FAILURE);
 	}
 	return tmp;
@@ -259,152 +271,22 @@ pg_malloc(size_t size)
 char *
 pg_strdup(const char *in)
 {
-	char       *tmp;
+	char	*tmp;
 
 	if (!in)
 	{
-		fprintf(stderr, "cannot duplicate null pointer (internal error)\n");
+		pg_log_error("cannot duplicate null pointer (internal error)\n");
 		exit(EXIT_FAILURE);
 	}
 	tmp = strdup(in);
 	if (!tmp)
 	{
-		fprintf(stderr, "out of memory\n");
+		pg_log_error("out of memory (pg_strdup)\n");
 		exit(EXIT_FAILURE);
 	}
 	return tmp;
 }
 #endif
-
-
-/*
- * Establish the PostgreSQL connection
- */
-PGconn *
-sql_conn()
-{
-	PGconn	   *my_conn;
-	char	   *password = NULL;
-	bool		new_pass;
-#if PG_VERSION_NUM >= 90300
-    const char **keywords;
-    const char **values;
-#else
-	int size;
-	char *dns;
-#endif
-	char		*message;
-
-	/*
-	 * Start the connection.  Loop until we have a password if requested by
-	 * backend.
-	 */
-	do
-	{
-
-#if PG_VERSION_NUM >= 90300
-		/*
-		 * We don't need to check if the database name is actually a complete
-		 * connection string, PQconnectdbParams being smart enough to check
-		 * this itself.
-		 */
-#define PARAMS_ARRAY_SIZE   8
-        keywords = pg_malloc(PARAMS_ARRAY_SIZE * sizeof(*keywords));
-        values = pg_malloc(PARAMS_ARRAY_SIZE * sizeof(*values));
-
-        keywords[0] = "host";
-        values[0] = opts->hostname,
-        keywords[1] = "port";
-        values[1] = opts->port;
-        keywords[2] = "user";
-        values[2] = opts->username;
-        keywords[3] = "password";
-        values[3] = password;
-        keywords[4] = "dbname";
-        values[4] = opts->dbname;
-        keywords[5] = "fallback_application_name";
-        values[5] = "pgwaitevent";
-        keywords[7] = NULL;
-        values[7] = NULL;
-
-        my_conn = PQconnectdbParams(keywords, values, true);
-#else
-		/* 34 is the length of the fallback application name setting */
-		size = 34;
-		if (opts->hostname)
-			size += strlen(opts->hostname) + 6;
-		if (opts->port)
-			size += strlen(opts->port) + 6;
-		if (opts->username)
-			size += strlen(opts->username) + 6;
-		if (opts->dbname)
-			size += strlen(opts->dbname) + 8;
-		dns = pg_malloc(size);
-		/*
-		 * Checking the presence of a = sign is our way to check that the
-		 * database name is actually a connection string. In such a case, we
-		 * keep this string as the connection string, and add other parameters
-		 * if they are supplied.
-		 */
-		sprintf(dns, "%s", "fallback_application_name='pgwaitevent' ");
-
-		if (strchr(opts->dbname, '=') != NULL)
-			sprintf(dns, "%s%s", dns, opts->dbname);
-		else if (opts->dbname)
-			sprintf(dns, "%sdbname=%s ", dns, opts->dbname);
-
-		if (opts->hostname)
-			sprintf(dns, "%shost=%s ", dns, opts->hostname);
-		if (opts->port)
-			sprintf(dns, "%sport=%s ", dns, opts->port);
-		if (opts->username)
-			sprintf(dns, "%suser=%s ", dns, opts->username);
-
-		if (opts->verbose)
-			printf("Connection string: %s\n", dns);
-
-		my_conn = PQconnectdb(dns);
-#endif
-
-        new_pass = false;
-
-		if (!my_conn)
-		{
-			errx(1, "could not connect to database %s\n", opts->dbname);
-		}
-
-#if PG_VERSION_NUM >= 80200
-		if (PQstatus(my_conn) == CONNECTION_BAD &&
-			PQconnectionNeedsPassword(my_conn) &&
-			!password)
-		{
-			PQfinish(my_conn);
-#if PG_VERSION_NUM < 100000
-			password = simple_prompt("Password: ", 100, false);
-#elif PG_VERSION_NUM < 140000
-			simple_prompt("Password: ", password, 100, false);
-#else
-			password = simple_prompt("Password: ", false);
-#endif
-			new_pass = true;
-		}
-#endif
-	} while (new_pass);
-
-	if (password)
-		free(password);
-
-	/* check to see that the backend connection was successfully made */
-	if (PQstatus(my_conn) == CONNECTION_BAD)
-	{
-		message = PQerrorMessage(my_conn);
-		errx(1, "could not connect to database %s: %s", opts->dbname, message);
-		PQfinish(my_conn);
-	}
-
-	/* return the conn if good */
-	return my_conn;
-}
 
 
 /*
@@ -414,7 +296,7 @@ void
 fetch_version()
 {
 	char		sql[PGWAITEVENT_DEFAULT_STRING_SIZE];
-	PGresult   *res;
+	PGresult	*res;
 
 	/* get the cluster version */
 	snprintf(sql, sizeof(sql), "SELECT version()");
@@ -425,10 +307,11 @@ fetch_version()
 	/* check and deal with errors */
 	if (!res || PQresultStatus(res) > 2)
 	{
-		warnx("pgwaitevent: query failed: %s", PQerrorMessage(conn));
+		pg_log_error("query failed: %s", PQerrorMessage(conn));
+		pg_log_info("query was: %s", sql);
 		PQclear(res);
 		PQfinish(conn);
-		errx(1, "pgwaitevent: query was: %s", sql);
+		exit(EXIT_FAILURE);
 	}
 
 	/* get the only row, and parse it to get major and minor numbers */
@@ -436,7 +319,7 @@ fetch_version()
 
 	/* print version */
 	if (opts->verbose)
-	    printf("Detected release: %d.%d\n", opts->major, opts->minor);
+		printf("Detected release: %d.%d\n", opts->major, opts->minor);
 
 	/* cleanup */
 	PQclear(res);
@@ -461,7 +344,7 @@ quit_properly(SIGNAL_ARGS)
 {
 	drop_env();
 	PQfinish(conn);
-	exit(1);
+	exit(EXIT_FAILURE);
 }
 
 
@@ -485,15 +368,16 @@ build_env()
 	/* check and deal with errors */
 	if (!res || PQresultStatus(res) > 2)
 	{
-		warnx("pgwaitevent: query failed: %s", PQerrorMessage(conn));
+		pg_log_error("query failed: %s", PQerrorMessage(conn));
+		pg_log_info("query was: %s", sql);
 		PQclear(res);
 		PQfinish(conn);
-		errx(1, "pgwaitevent: query was: %s", sql);
+		exit(EXIT_FAILURE);
 	}
 
 	/* print verbose */
 	if (opts->verbose)
-	    printf("Temporary table created\n");
+		printf("Temporary table created\n");
 
 	/* cleanup */
 	PQclear(res);
@@ -566,15 +450,16 @@ build_env()
 	/* check and deal with errors */
 	if (!res || PQresultStatus(res) > 2)
 	{
-		warnx("pgwaitevent: query failed: %s", PQerrorMessage(conn));
+		pg_log_error("query failed: %s", PQerrorMessage(conn));
+		pg_log_info("query was: %s", sql);
 		PQclear(res);
 		PQfinish(conn);
-		errx(1, "pgwaitevent: query was: %s", sql);
+		exit(EXIT_FAILURE);
 	}
 
 	/* print verbose */
 	if (opts->verbose)
-	    printf("Function created\n");
+		printf("Function created\n");
 
 	/* cleanup */
 	PQclear(res);
@@ -604,10 +489,11 @@ active_session()
 	/* check and deal with errors */
 	if (!res || PQresultStatus(res) > 2)
 	{
-		warnx("pgwaitevent: query failed: %s", PQerrorMessage(conn));
+		pg_log_error("query failed: %s", PQerrorMessage(conn));
+		pg_log_info("query was: %s", sql);
 		PQclear(res);
 		PQfinish(conn);
-		errx(1, "pgwaitevent: query was: %s", sql);
+		exit(EXIT_FAILURE);
 	}
 
 	/* if zero row, then PID is gone */
@@ -668,10 +554,11 @@ handle_current_query()
 		/* check and deal with errors */
 		if (!workers_res || PQresultStatus(workers_res) > 2)
 		{
-			warnx("pgwaitevent: query failed: %s", PQerrorMessage(conn));
+			pg_log_error("query failed: %s", PQerrorMessage(conn));
+			pg_log_info("query was: %s", sql);
 			PQclear(workers_res);
 			PQfinish(conn);
-			errx(1, "pgwaitevent: query was: %s", sql);
+			exit(EXIT_FAILURE);
 		}
 
 		/* get the number of leader and workers */
@@ -691,10 +578,11 @@ handle_current_query()
 	/* check and deal with errors */
 	if (!trace_res || PQresultStatus(trace_res) > 2)
 	{
-		warnx("pgwaitevent: query failed: %s", PQerrorMessage(conn));
+		pg_log_error("query failed: %s", PQerrorMessage(conn));
+		pg_log_info("query was: %s", sql);
 		PQclear(trace_res);
 		PQfinish(conn);
-		errx(1, "pgwaitevent: query was: %s", sql);
+		exit(EXIT_FAILURE);
 	}
 
 	/* build the duration query */
@@ -707,10 +595,11 @@ handle_current_query()
 	/* check and deal with errors */
 	if (!duration_res || PQresultStatus(duration_res) > 2)
 	{
-		warnx("pgwaitevent: query failed: %s", PQerrorMessage(conn));
+		pg_log_error("query failed: %s", PQerrorMessage(conn));
+		pg_log_info("query was: %s", sql);
 		PQclear(duration_res);
 		PQfinish(conn);
-		errx(1, "pgwaitevent: query was: %s", sql);
+		exit(EXIT_FAILURE);
 	}
 
 	/* show durations */
@@ -740,7 +629,7 @@ handle_current_query()
 			PQgetvalue(trace_res, row, 1),
 			atol(PQgetvalue(trace_res, row, 2)),
 			atof(PQgetvalue(trace_res, row, 3))
-		    );
+		);
 	}
 
 	/* print footers */
@@ -760,7 +649,7 @@ void
 drop_env()
 {
 	char		sql[PGWAITEVENT_DEFAULT_STRING_SIZE];
-	PGresult   *res;
+	PGresult	*res;
 
 	/* no need to drop the temp table */
 
@@ -774,15 +663,16 @@ drop_env()
 	/* check and deal with errors */
 	if (!res || PQresultStatus(res) > 2)
 	{
-		warnx("pgwaitevent: query failed: %s", PQerrorMessage(conn));
+		pg_log_error("query failed: %s", PQerrorMessage(conn));
+		pg_log_info("query was: %s", sql);
 		PQclear(res);
 		PQfinish(conn);
-		errx(1, "pgwaitevent: query was: %s", sql);
+		exit(EXIT_FAILURE);
 	}
 
 	/* print verbose */
 	if (opts->verbose)
-	    printf("Function dropped\n");
+		printf("Function dropped\n");
 
 	/* cleanup */
 	PQclear(res);
@@ -795,11 +685,20 @@ drop_env()
 int
 main(int argc, char **argv)
 {
+	const char  *progname;
+	ConnParams   cparams;
+
 	/*
 	 * If the user stops the program,
 	 * quit nicely.
 	 */
 	pqsignal(SIGINT, quit_properly);
+
+	/* Initialize the logging interface */
+	pg_logging_init(argv[0]);
+
+	/* Get the program name */
+	progname = get_progname(argv[0]);
 
 	/* Allocate the options struct */
 	opts = (struct options *) pg_malloc(sizeof(struct options));
@@ -807,8 +706,16 @@ main(int argc, char **argv)
 	/* Parse the options */
 	get_opts(argc, argv);
 
+	/* Set the connection struct */
+	cparams.pghost = opts->hostname;
+	cparams.pgport = opts->port;
+	cparams.pguser = opts->username;
+	cparams.dbname = opts->dbname;
+	cparams.prompt_password = TRI_DEFAULT;
+	cparams.override_dbname = NULL;
+
 	/* Connect to the database */
-	conn = sql_conn();
+	conn = connectDatabase(&cparams, progname, false, false, false);
 
 	/* Fetch version */
 	fetch_version();
@@ -816,7 +723,8 @@ main(int argc, char **argv)
 	/* Check options */
 	if (opts->includeleaderworkers && !backend_minimum_version(13, 0))
 	{
-		errx(1, "You need at least v13 to include workers' wait events.");
+		pg_log_error("You need at least v13 to include workers' wait events.");
+		exit(EXIT_FAILURE);
 	}
 
 	/* Create the trace_wait_events_for_pid function */
