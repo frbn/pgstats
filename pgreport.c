@@ -27,6 +27,16 @@
 #include <getopt.h>
 #endif
 
+#include "postgres_fe.h"
+#include "common/username.h"
+#include "common/logging.h"
+#include "fe_utils/cancel.h"
+#include "fe_utils/connect_utils.h"
+#include "fe_utils/option_utils.h"
+#include "fe_utils/query_utils.h"
+#include "fe_utils/simple_list.h"
+#include "fe_utils/string_utils.h"
+
 #include "fe_utils/print.h"
 #include "libpq-fe.h"
 #include "libpq/pqsignal.h"
@@ -68,21 +78,20 @@ struct options
 /*
  * Global variables
  */
-PGconn          *conn;
+PGconn		*conn;
 struct options  *opts;
-extern char     *optarg;
+extern char	*optarg;
 
 
 /*
  * Function prototypes
  */
-static void help(const char *progname);
+static void	help(const char *progname);
 void		get_opts(int, char **);
 #ifndef FE_MEMUTILS_H
-void	   *pg_malloc(size_t size);
-char	   *pg_strdup(const char *in);
+void		*pg_malloc(size_t size);
+char		*pg_strdup(const char *in);
 #endif
-PGconn	   *sql_conn(void);
 bool		backend_minimum_version(int major, int minor);
 void		execute(char *query);
 void		install_extension(char *extension);
@@ -93,7 +102,7 @@ void		fetch_table(char *label, char *query);
 void		fetch_file(char *filename);
 void		fetch_kernelconfig(char *cfg);
 void		exec_command(char *cmd);
-static void quit_properly(SIGNAL_ARGS);
+static void	quit_properly(SIGNAL_ARGS);
 
 
 /*
@@ -177,7 +186,7 @@ get_opts(int argc, char **argv)
 				/* get script */
 			case 's':
 				opts->script = pg_strdup(optarg);
-	            sscanf(opts->script, "%d.%d", &(opts->major), &(opts->minor));
+				sscanf(opts->script, "%d.%d", &(opts->major), &(opts->minor));
 				break;
 
 				/* username */
@@ -191,7 +200,8 @@ get_opts(int argc, char **argv)
 				break;
 
 			default:
-				errx(1, "Try \"%s --help\" for more information.\n", progname);
+				pg_log_error("Try \"%s --help\" for more information.\n", progname);
+				exit(EXIT_FAILURE);
 		}
 	}
 
@@ -226,7 +236,7 @@ pg_malloc(size_t size)
 	tmp = malloc(size);
 	if (!tmp)
 	{
-		fprintf(stderr, "out of memory\n");
+		pg_log_error("out of memory (pg_malloc)\n");
 		exit(EXIT_FAILURE);
 	}
 	return tmp;
@@ -243,148 +253,18 @@ pg_strdup(const char *in)
 
 	if (!in)
 	{
-		fprintf(stderr, "cannot duplicate null pointer (internal error)\n");
+		pg_log_error("cannot duplicate null pointer (internal error)\n");
 		exit(EXIT_FAILURE);
 	}
 	tmp = strdup(in);
 	if (!tmp)
 	{
-		fprintf(stderr, "out of memory\n");
+		pg_log_error("out of memory (pg_strdup)\n");
 		exit(EXIT_FAILURE);
 	}
 	return tmp;
 }
 #endif
-
-
-/*
- * Establish the PostgreSQL connection
- */
-PGconn *
-sql_conn()
-{
-	PGconn	   *my_conn;
-	char	   *password = NULL;
-	bool		new_pass;
-#if PG_VERSION_NUM >= 90300
-    const char **keywords;
-    const char **values;
-#else
-	int size;
-	char *dns;
-#endif
-	char		*message;
-
-	/*
-	 * Start the connection.  Loop until we have a password if requested by
-	 * backend.
-	 */
-	do
-	{
-
-#if PG_VERSION_NUM >= 90300
-		/*
-		 * We don't need to check if the database name is actually a complete
-		 * connection string, PQconnectdbParams being smart enough to check
-		 * this itself.
-		 */
-#define PARAMS_ARRAY_SIZE   8
-        keywords = pg_malloc(PARAMS_ARRAY_SIZE * sizeof(*keywords));
-        values = pg_malloc(PARAMS_ARRAY_SIZE * sizeof(*values));
-
-        keywords[0] = "host";
-        values[0] = opts->hostname,
-        keywords[1] = "port";
-        values[1] = opts->port;
-        keywords[2] = "user";
-        values[2] = opts->username;
-        keywords[3] = "password";
-        values[3] = password;
-        keywords[4] = "dbname";
-        values[4] = opts->dbname;
-        keywords[5] = "fallback_application_name";
-        values[5] = "pgreport";
-        keywords[7] = NULL;
-        values[7] = NULL;
-
-        my_conn = PQconnectdbParams(keywords, values, true);
-#else
-		/* 34 is the length of the fallback application name setting */
-		size = 34;
-		if (opts->hostname)
-			size += strlen(opts->hostname) + 6;
-		if (opts->port)
-			size += strlen(opts->port) + 6;
-		if (opts->username)
-			size += strlen(opts->username) + 6;
-		if (opts->dbname)
-			size += strlen(opts->dbname) + 8;
-		dns = pg_malloc(size);
-		/*
-		 * Checking the presence of a = sign is our way to check that the
-		 * database name is actually a connection string. In such a case, we
-		 * keep this string as the connection string, and add other parameters
-		 * if they are supplied.
-		 */
-		sprintf(dns, "%s", "fallback_application_name='pgreport' ");
-
-		if (strchr(opts->dbname, '=') != NULL)
-			sprintf(dns, "%s%s", dns, opts->dbname);
-		else if (opts->dbname)
-			sprintf(dns, "%sdbname=%s ", dns, opts->dbname);
-
-		if (opts->hostname)
-			sprintf(dns, "%shost=%s ", dns, opts->hostname);
-		if (opts->port)
-			sprintf(dns, "%sport=%s ", dns, opts->port);
-		if (opts->username)
-			sprintf(dns, "%suser=%s ", dns, opts->username);
-
-		if (opts->verbose)
-			printf("Connection string: %s\n", dns);
-
-		my_conn = PQconnectdb(dns);
-#endif
-
-        new_pass = false;
-
-		if (!my_conn)
-		{
-			errx(1, "could not connect to database %s\n", opts->dbname);
-		}
-
-#if PG_VERSION_NUM >= 80200
-		if (PQstatus(my_conn) == CONNECTION_BAD &&
-			PQconnectionNeedsPassword(my_conn) &&
-			!password)
-		{
-			PQfinish(my_conn);
-#if PG_VERSION_NUM < 100000
-			password = simple_prompt("Password: ", 100, false);
-#elif PG_VERSION_NUM < 140000
-			simple_prompt("Password: ", password, 100, false);
-#else
-			password = simple_prompt("Password: ", false);
-#endif
-			new_pass = true;
-		}
-#endif
-	} while (new_pass);
-
-	if (password)
-		free(password);
-
-	/* check to see that the backend connection was successfully made */
-	if (PQstatus(my_conn) == CONNECTION_BAD)
-	{
-		message = PQerrorMessage(my_conn);
-		errx(1, "could not connect to database %s: %s", opts->dbname, message);
-		PQfinish(my_conn);
-	}
-
-	/* return the conn if good */
-	return my_conn;
-}
 
 
 /*
@@ -417,10 +297,11 @@ execute(char *query)
 		/* check and deal with errors */
 		if (!results)
 		{
-			warnx("pgreport: query failed: %s", PQerrorMessage(conn));
+			pg_log_error("query failed: %s", PQerrorMessage(conn));
+			pg_log_info("query was: %s", query);
 			PQclear(results);
 			PQfinish(conn);
-			errx(1, "pgreport: query was: %s", query);
+			exit(EXIT_FAILURE);
 		}
 
 		/* cleanup */
@@ -436,8 +317,8 @@ void
 install_extension(char *extension)
 {
 	char		check_sql[PGREPORT_DEFAULT_STRING_SIZE],
-				install_sql[PGREPORT_DEFAULT_STRING_SIZE];
-	PGresult   *check_res, *install_res;
+			install_sql[PGREPORT_DEFAULT_STRING_SIZE];
+	PGresult	*check_res, *install_res;
 
 	if (opts->script)
 	{
@@ -459,10 +340,11 @@ install_extension(char *extension)
 		/* check and deal with errors */
 		if (!check_res || PQresultStatus(check_res) > 2)
 		{
-			warnx("pgreport: query failed: %s", PQerrorMessage(conn));
+			pg_log_error("query failed: %s", PQerrorMessage(conn));
+			pg_log_info("query was: %s", check_sql);
 			PQclear(check_res);
 			PQfinish(conn);
-			errx(1, "pgreport: query was: %s", check_sql);
+			exit(EXIT_FAILURE);
 		}
 
 		if (PQntuples(check_res) == 0)
@@ -478,10 +360,11 @@ install_extension(char *extension)
 			/* install and deal with errors */
 			if (!install_res || PQresultStatus(install_res) > 2)
 			{
-				warnx("pgreport: query failed: %s", PQerrorMessage(conn));
+				pg_log_error("query failed: %s", PQerrorMessage(conn));
+				pg_log_info("query was: %s", install_sql);
 				PQclear(install_res);
 				PQfinish(conn);
-				errx(1, "pgreport: query was: %s", install_sql);
+				exit(EXIT_FAILURE);
 			}
 			/* cleanup */
 			PQclear(install_res);
@@ -500,7 +383,7 @@ void
 fetch_version()
 {
 	char		sql[PGREPORT_DEFAULT_STRING_SIZE];
-	PGresult   *res;
+	PGresult	*res;
 
 	if (opts->script)
 	{
@@ -518,10 +401,11 @@ fetch_version()
 		/* check and deal with errors */
 		if (!res || PQresultStatus(res) > 2)
 		{
-			warnx("pgreport: query failed: %s", PQerrorMessage(conn));
+			pg_log_error("query failed: %s", PQerrorMessage(conn));
+			pg_log_info("query was: %s", sql);
 			PQclear(res);
 			PQfinish(conn);
-			errx(1, "pgreport: query was: %s", sql);
+			exit(EXIT_FAILURE);
 		}
 
 		/* get the only row, and parse it to get major and minor numbers */
@@ -531,7 +415,7 @@ fetch_version()
 		if (opts->verbose)
 			printf("Detected release: %d.%d\n", opts->major, opts->minor);
 
-		printf ("PostgreSQL version: %s\n", PQgetvalue(res, 0, 0));
+		printf("PostgreSQL version: %s\n", PQgetvalue(res, 0, 0));
 
 		/* cleanup */
 		PQclear(res);
@@ -546,7 +430,7 @@ void
 fetch_postmaster_reloadconftime()
 {
 	char		sql[PGREPORT_DEFAULT_STRING_SIZE];
-	PGresult   *res;
+	PGresult	*res;
 
 	if (opts->script)
 	{
@@ -564,13 +448,14 @@ fetch_postmaster_reloadconftime()
 		/* check and deal with errors */
 		if (!res || PQresultStatus(res) > 2)
 		{
-			warnx("pgreport: query failed: %s", PQerrorMessage(conn));
+			pg_log_error("query failed: %s", PQerrorMessage(conn));
+			pg_log_info("query was: %s", sql);
 			PQclear(res);
 			PQfinish(conn);
-			errx(1, "pgreport: query was: %s", sql);
+			exit(EXIT_FAILURE);
 		}
 
-		printf ("PostgreSQL reload conf time: %s\n", PQgetvalue(res, 0, 0));
+		printf("PostgreSQL reload conf time: %s\n", PQgetvalue(res, 0, 0));
 
 		/* cleanup */
 		PQclear(res);
@@ -585,7 +470,7 @@ void
 fetch_postmaster_starttime()
 {
 	char		sql[PGREPORT_DEFAULT_STRING_SIZE];
-	PGresult   *res;
+	PGresult	*res;
 
 	if (opts->script)
 	{
@@ -603,10 +488,11 @@ fetch_postmaster_starttime()
 		/* check and deal with errors */
 		if (!res || PQresultStatus(res) > 2)
 		{
-			warnx("pgreport: query failed: %s", PQerrorMessage(conn));
+			pg_log_error("query failed: %s", PQerrorMessage(conn));
+			pg_log_info("query was: %s", sql);
 			PQclear(res);
 			PQfinish(conn);
-			errx(1, "pgreport: query was: %s", sql);
+			exit(EXIT_FAILURE);
 		}
 
 		printf ("PostgreSQL start time: %s\n", PQgetvalue(res, 0, 0));
@@ -624,7 +510,7 @@ void
 fetch_table(char *label, char *query)
 {
 	PGresult	*res;
-	printQueryOpt myopt;
+	printQueryOpt	myopt;
 
 	if (opts->script)
 	{
@@ -665,10 +551,11 @@ fetch_table(char *label, char *query)
 		/* check and deal with errors */
 		if (!res || PQresultStatus(res) > 2)
 		{
-			warnx("pgreport: query failed: %s", PQerrorMessage(conn));
+			pg_log_error("query failed: %s", PQerrorMessage(conn));
+			pg_log_info("query was: %s", query);
 			PQclear(res);
 			PQfinish(conn);
-			errx(1, "pgreport: query was: %s", query);
+			exit(EXIT_FAILURE);
 		}
 
 		/* print results */
@@ -728,14 +615,14 @@ exec_command(char *cmd)
 	if (pipe(filedes) == -1)
 	{
 		perror("pipe");
-		exit(1);
+		exit(EXIT_FAILURE);
 	}
 
 	pid = fork();
 	if (pid == -1)
 	{
 		perror("fork");
-		exit(1);
+		exit(EXIT_FAILURE);
 	}
 	else if (pid == 0)
 	{
@@ -744,7 +631,7 @@ exec_command(char *cmd)
 		close(filedes[0]);
 		execl(cmd, cmd, (char*)0);
 		perror("execl");
-		_exit(1);
+		_exit(EXIT_FAILURE);
 	}
 	close(filedes[1]);
 
@@ -762,7 +649,7 @@ exec_command(char *cmd)
 			else
 			{
 				perror("read");
-				exit(1);
+				exit(EXIT_FAILURE);
 			}
 		}
 		else if (count == 0)
@@ -787,7 +674,7 @@ static void
 quit_properly(SIGNAL_ARGS)
 {
 	PQfinish(conn);
-	exit(1);
+	exit(EXIT_FAILURE);
 }
 
 
@@ -797,6 +684,8 @@ quit_properly(SIGNAL_ARGS)
 int
 main(int argc, char **argv)
 {
+	const char  *progname;
+	ConnParams   cparams;
 	char sql[10240];
 
 	/*
@@ -804,6 +693,12 @@ main(int argc, char **argv)
 	 * quit nicely.
 	 */
 	pqsignal(SIGINT, quit_properly);
+
+	/* Initialize the logging interface */
+	pg_logging_init(argv[0]);
+
+	/* Get the program name */
+	progname = get_progname(argv[0]);
 
 	/* Allocate the options struct */
 	opts = (struct options *) pg_malloc(sizeof(struct options));
@@ -820,8 +715,16 @@ main(int argc, char **argv)
 	}
 	else
 	{
-		/* connect to the database */
-		conn = sql_conn();
+		/* Set the connection struct */
+		cparams.pghost = opts->hostname;
+		cparams.pgport = opts->port;
+		cparams.pguser = opts->username;
+		cparams.dbname = opts->dbname;
+		cparams.prompt_password = TRI_DEFAULT;
+		cparams.override_dbname = NULL;
+
+		/* Connect to the database */
+		conn = connectDatabase(&cparams, progname, false, false, false);
 	}
 
 	/* Create schema, and set if as our search_path */

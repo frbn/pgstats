@@ -26,6 +26,16 @@
 #include <getopt.h>
 #endif
 
+#include "postgres_fe.h"
+#include "common/username.h"
+#include "common/logging.h"
+#include "fe_utils/cancel.h"
+#include "fe_utils/connect_utils.h"
+#include "fe_utils/option_utils.h"
+#include "fe_utils/query_utils.h"
+#include "fe_utils/simple_list.h"
+#include "fe_utils/string_utils.h"
+
 #include "libpq-fe.h"
 #include "libpq/pqsignal.h"
 
@@ -74,44 +84,44 @@ typedef enum
 struct options
 {
 	/* misc */
-	bool		verbose;
-	bool        dontredisplayheader;
-	stat_t      stat;
-	char	   *filter;
-	bool        human_readable;
+	bool	verbose;
+	bool	dontredisplayheader;
+	stat_t	stat;
+	char	*filter;
+	bool	human_readable;
 
 	/* connection parameters */
-	char	   *dbname;
-	char	   *hostname;
-	char	   *port;
-	char	   *username;
+	char   *dbname;
+	char   *hostname;
+	char   *port;
+	char   *username;
 
 	/* version number */
-	int			major;
-	int			minor;
+	int	major;
+	int	minor;
 
 	/* extension namespace (pg_stat_statements or pg_buffercache) */
-	char	   *namespace;
+	char   *namespace;
 
 	/* frequency */
-	int			interval;
-	int			count;
+	int	interval;
+	int	count;
 };
 
 /* pg_stat_archiver struct */
 struct pgstatarchiver
 {
 	long archived_count;
-    /*
+	/*
 	we don't put these columns here because it makes no sense to get a diff between the new and the old values
 	? last_archived_wal;
-    ? last_archived_time;
+	? last_archived_time;
 	*/
 	long failed_count;
-    /*
+	/*
 	we don't put these columns here because it makes no sense to get a diff between the new and the old values
 	? last_failed_wal;
-    ? last_failed_time;
+	? last_failed_time;
 	*/
 	char *stats_reset;
 };
@@ -169,29 +179,29 @@ struct pgstatdatabase
 /* pg_stat_all_tables struct */
 struct pgstattable
 {
-    long seq_scan;
-    long seq_tup_read;
-    long idx_scan;
-    long idx_tup_fetch;
-    long n_tup_ins;
-    long n_tup_upd;
-    long n_tup_del;
-    long n_tup_hot_upd;
-    long n_live_tup;
-    long n_dead_tup;
-    long n_mod_since_analyze;
+	long seq_scan;
+	long seq_tup_read;
+	long idx_scan;
+	long idx_tup_fetch;
+	long n_tup_ins;
+	long n_tup_upd;
+	long n_tup_del;
+	long n_tup_hot_upd;
+	long n_live_tup;
+	long n_dead_tup;
+	long n_mod_since_analyze;
 	long n_ins_since_vacuum;
-    /*
+	/*
 	we don't put the timestamps here because it makes no sense to get a diff between the new and the old values
 	? last_vacuum;
-    ? last_autovacuum;
-    ? last_analyze;
-    ? last_autoanalyze;
+	? last_autovacuum;
+	? last_analyze;
+	? last_autoanalyze;
 	*/
 	long vacuum_count;
-    long autovacuum_count;
-    long analyze_count;
-    long autoanalyze_count;
+	long autovacuum_count;
+	long analyze_count;
+	long autoanalyze_count;
 };
 
 /* pg_statio_all_tables struct */
@@ -218,9 +228,9 @@ struct pgstatindex
 /* pg_stat_user_functions struct */
 struct pgstatfunction
 {
-    long   calls;
-    float total_time;
-    float self_time;
+	long   calls;
+	float total_time;
+	float self_time;
 };
 
 /* pg_stat_statements struct */
@@ -269,13 +279,13 @@ struct pgstatstatement
 /* pg_stat_slru struct */
 struct pgstatslru
 {
-    long blks_zeroed;
-    long blks_hit;
-    long blks_read;
-    long blks_written;
-    long blks_exists;
-    long flushes;
-    long truncates;
+	long blks_zeroed;
+	long blks_hit;
+	long blks_read;
+	long blks_written;
+	long blks_exists;
+	long flushes;
+	long truncates;
 	char *stats_reset;
 };
 
@@ -311,87 +321,86 @@ struct xlogstats
 /* pgBouncer stats struct */
 struct pgbouncerstats
 {
-    long total_request;
-    long total_received;
-    long total_sent;
-    long total_query_time;
+	long total_request;
+	long total_received;
+	long total_sent;
+	long total_query_time;
 	/* not used yet
-    float avg_req;
-    float avg_recv;
-    float avg_sent;
-    float avg_query;
+	float avg_req;
+	float avg_recv;
+	float avg_sent;
+	float avg_query;
 	*/
 };
 
 /*
  * Global variables
  */
-PGconn	   		       *conn;
-struct options	       *opts;
-extern char            *optarg;
-struct pgstatarchiver  *previous_pgstatarchiver;
-struct pgstatbgwriter  *previous_pgstatbgwriter;
-struct pgstatdatabase  *previous_pgstatdatabase;
-struct pgstattable     *previous_pgstattable;
-struct pgstattableio   *previous_pgstattableio;
-struct pgstatindex     *previous_pgstatindex;
-struct pgstatfunction  *previous_pgstatfunction;
-struct pgstatstatement *previous_pgstatstatement;
-struct pgstatslru      *previous_pgstatslru;
-struct pgstatwal       *previous_pgstatwal;
-struct xlogstats       *previous_xlogstats;
-struct repslots        *previous_repslots;
-struct pgbouncerstats  *previous_pgbouncerstats;
-int                     hdrcnt = 0;
-volatile sig_atomic_t   wresized;
-static int              winlines = PGSTAT_DEFAULT_LINES;
+PGconn			*conn;
+struct options		*opts;
+extern char		*optarg;
+struct pgstatarchiver	*previous_pgstatarchiver;
+struct pgstatbgwriter	*previous_pgstatbgwriter;
+struct pgstatdatabase	*previous_pgstatdatabase;
+struct pgstattable	*previous_pgstattable;
+struct pgstattableio	*previous_pgstattableio;
+struct pgstatindex	*previous_pgstatindex;
+struct pgstatfunction	*previous_pgstatfunction;
+struct pgstatstatement	*previous_pgstatstatement;
+struct pgstatslru	*previous_pgstatslru;
+struct pgstatwal	*previous_pgstatwal;
+struct xlogstats	*previous_xlogstats;
+struct repslots		*previous_repslots;
+struct pgbouncerstats	*previous_pgbouncerstats;
+int			hdrcnt = 0;
+volatile sig_atomic_t	wresized;
+static int		winlines = PGSTAT_DEFAULT_LINES;
 
 /*
  * Function prototypes
  */
-static void help(const char *progname);
+static void	help(const char *progname);
 void		get_opts(int, char **);
 #ifndef FE_MEMUTILS_H
-void	   *pg_malloc(size_t size);
-char	   *pg_strdup(const char *in);
+void	   	*pg_malloc(size_t size);
+char	   	*pg_strdup(const char *in);
 #endif
-PGconn	   *sql_conn(void);
 void		print_pgstatarchiver(void);
 void		print_pgstatbgwriter(void);
-void        print_pgstatconnection(void);
-void        print_pgstatdatabase(void);
-void        print_pgstattable(void);
+void		print_pgstatconnection(void);
+void		print_pgstatdatabase(void);
+void		print_pgstattable(void);
 void		print_pgstattableio(void);
-void        print_pgstatindex(void);
-void        print_pgstatfunction(void);
-void        print_pgstatstatement(void);
-void        print_pgstatslru(void);
-void        print_pgstatwal(void);
-void        print_pgstatprogressanalyze(void);
-void        print_pgstatprogressbasebackup(void);
-void        print_pgstatprogresscluster(void);
-void        print_pgstatprogresscopy(void);
-void        print_pgstatprogresscreateindex(void);
-void        print_pgstatprogressvacuum(void);
+void		print_pgstatindex(void);
+void		print_pgstatfunction(void);
+void		print_pgstatstatement(void);
+void		print_pgstatslru(void);
+void		print_pgstatwal(void);
+void		print_pgstatprogressanalyze(void);
+void		print_pgstatprogressbasebackup(void);
+void		print_pgstatprogresscluster(void);
+void		print_pgstatprogresscopy(void);
+void		print_pgstatprogresscreateindex(void);
+void		print_pgstatprogressvacuum(void);
 void		print_buffercache(void);
-void        print_xlogstats(void);
-void        print_repslotsstats(void);
-void        print_tempfilestats(void);
-void        print_pgstatwaitevent(void);
-void        print_pgbouncerpools(void);
-void        print_pgbouncerstats(void);
+void		print_xlogstats(void);
+void		print_repslotsstats(void);
+void		print_tempfilestats(void);
+void		print_pgstatwaitevent(void);
+void		print_pgbouncerpools(void);
+void		print_pgbouncerstats(void);
 void		fetch_version(void);
-char	   *fetch_setting(char *name);
+char	   	*fetch_setting(char *name);
 void		fetch_pgbuffercache_namespace(void);
 void		fetch_pgstatstatements_namespace(void);
 bool		backend_minimum_version(int major, int minor);
-void        print_header(void);
-void        print_line(void);
-void        allocate_struct(void);
-static void needhdr(int dummy);
+void		print_header(void);
+void		print_line(void);
+void		allocate_struct(void);
+static void	needhdr(int dummy);
 static void	needresize(int);
-void        doresize(void);
-static void quit_properly(SIGNAL_ARGS);
+void		doresize(void);
+static void	quit_properly(SIGNAL_ARGS);
 
 /*
  * Print help message
@@ -522,7 +531,8 @@ get_opts(int argc, char **argv)
 			case 's':
 				if (opts->stat != NONE)
 				{
-					errx(1, "You can only use once the -s command line switch.\n");
+					pg_log_error("You can only use once the -s command line switch.\n");
+					exit(EXIT_FAILURE);
 				}
 
 				if (!strcmp(optarg, "archiver"))
@@ -623,8 +633,9 @@ get_opts(int argc, char **argv)
 				}
 				else
 				{
-					errx(1, "Unknown service \"%s\".\nTry \"%s --help\" for more information.\n",
-					     optarg, progname);
+					pg_log_error("Unknown service \"%s\".\n", optarg);
+					pg_log_info("Try \"%s --help\" for more information.\n", progname);
+					exit(EXIT_FAILURE);
 				}
 				break;
 
@@ -649,7 +660,8 @@ get_opts(int argc, char **argv)
 				break;
 
 			default:
-				errx(1, "Try \"%s --help\" for more information.\n", progname);
+				pg_log_error("Try \"%s --help\" for more information.\n", progname);
+				exit(EXIT_FAILURE);
 		}
 	}
 
@@ -658,7 +670,9 @@ get_opts(int argc, char **argv)
 		opts->interval = atoi(argv[optind]);
 		if (opts->interval == 0)
 		{
-			errx(1, "Invalid delay.\nTry \"%s --help\" for more information.\n", progname);
+			pg_log_error("Invalid delay.\n");
+			pg_log_info("Try \"%s --help\" for more information.\n", progname);
+			exit(EXIT_FAILURE);
 		}
 		optind++;
 	}
@@ -668,7 +682,9 @@ get_opts(int argc, char **argv)
 		opts->count = atoi(argv[optind]);
 		if (opts -> count == 0)
 		{
-			errx(1, "Invalid count.\nTry \"%s --help\" for more information.\n", progname);
+			pg_log_error("Invalid count.\n");
+			pg_log_info("Try \"%s --help\" for more information.\n", progname);
+			exit(EXIT_FAILURE);
 		}
 	}
 
@@ -711,7 +727,7 @@ pg_malloc(size_t size)
 	tmp = malloc(size);
 	if (!tmp)
 	{
-		fprintf(stderr, "out of memory\n");
+		pg_log_error("out of memory (pg_malloc)\n");
 		exit(EXIT_FAILURE);
 	}
 	return tmp;
@@ -727,147 +743,18 @@ pg_strdup(const char *in)
 
 	if (!in)
 	{
-		fprintf(stderr, "cannot duplicate null pointer (internal error)\n");
+		pg_log_error("cannot duplicate null pointer (internal error)\n");
 		exit(EXIT_FAILURE);
 	}
 	tmp = strdup(in);
 	if (!tmp)
 	{
-		fprintf(stderr, "out of memory\n");
+		pg_log_error("out of memory (pg_strdup)\n");
 		exit(EXIT_FAILURE);
 	}
 	return tmp;
 }
 #endif
-
-/*
- * Establish the PostgreSQL connection
- */
-PGconn *
-sql_conn()
-{
-	PGconn	   *my_conn;
-	char	   *password = NULL;
-	bool		new_pass;
-#if PG_VERSION_NUM >= 90300
-    const char **keywords;
-    const char **values;
-#else
-	int size;
-	char *dns;
-#endif
-	char		*message;
-
-	/*
-	 * Start the connection.  Loop until we have a password if requested by
-	 * backend.
-	 */
-	do
-	{
-
-#if PG_VERSION_NUM >= 90300
-		/*
-		 * We don't need to check if the database name is actually a complete
-		 * connection string, PQconnectdbParams being smart enough to check
-		 * this itself.
-		 */
-#define PARAMS_ARRAY_SIZE   8
-        keywords = pg_malloc(PARAMS_ARRAY_SIZE * sizeof(*keywords));
-        values = pg_malloc(PARAMS_ARRAY_SIZE * sizeof(*values));
-
-        keywords[0] = "host";
-        values[0] = opts->hostname,
-        keywords[1] = "port";
-        values[1] = opts->port;
-        keywords[2] = "user";
-        values[2] = opts->username;
-        keywords[3] = "password";
-        values[3] = password;
-        keywords[4] = "dbname";
-        values[4] = opts->dbname;
-        keywords[5] = "fallback_application_name";
-        values[5] = "pgstat";
-        keywords[7] = NULL;
-        values[7] = NULL;
-
-        my_conn = PQconnectdbParams(keywords, values, true);
-#else
-		/* 34 is the length of the fallback application name setting */
-		size = 34;
-		if (opts->hostname)
-			size += strlen(opts->hostname) + 6;
-		if (opts->port)
-			size += strlen(opts->port) + 6;
-		if (opts->username)
-			size += strlen(opts->username) + 6;
-		if (opts->dbname)
-			size += strlen(opts->dbname) + 8;
-		dns = pg_malloc(size);
-		/*
-		 * Checking the presence of a = sign is our way to check that the
-		 * database name is actually a connection string. In such a case, we
-		 * keep this string as the connection string, and add other parameters
-		 * if they are supplied.
-		 */
-		sprintf(dns, "%s", "fallback_application_name='pgstat' ");
-
-		if (strchr(opts->dbname, '=') != NULL)
-			sprintf(dns, "%s%s", dns, opts->dbname);
-		else if (opts->dbname)
-			sprintf(dns, "%sdbname=%s ", dns, opts->dbname);
-
-		if (opts->hostname)
-			sprintf(dns, "%shost=%s ", dns, opts->hostname);
-		if (opts->port)
-			sprintf(dns, "%sport=%s ", dns, opts->port);
-		if (opts->username)
-			sprintf(dns, "%suser=%s ", dns, opts->username);
-
-		if (opts->verbose)
-			printf("Connection string: %s\n", dns);
-
-		my_conn = PQconnectdb(dns);
-#endif
-
-        new_pass = false;
-
-		if (!my_conn)
-		{
-			errx(1, "could not connect to database %s\n", opts->dbname);
-		}
-
-#if PG_VERSION_NUM >= 80200
-		if (PQstatus(my_conn) == CONNECTION_BAD &&
-			PQconnectionNeedsPassword(my_conn) &&
-			!password)
-		{
-			PQfinish(my_conn);
-#if PG_VERSION_NUM < 100000
-			password = simple_prompt("Password: ", 100, false);
-#elif PG_VERSION_NUM < 140000
-			simple_prompt("Password: ", password, 100, false);
-#else
-			password = simple_prompt("Password: ", false);
-#endif
-			new_pass = true;
-		}
-#endif
-	} while (new_pass);
-
-	if (password)
-		free(password);
-
-	/* check to see that the backend connection was successfully made */
-	if (PQstatus(my_conn) == CONNECTION_BAD)
-	{
-		message = PQerrorMessage(my_conn);
-		errx(1, "could not connect to database %s: %s", opts->dbname, message);
-		PQfinish(my_conn);
-	}
-
-	/* return the conn if good */
-	return my_conn;
-}
 
 /*
  * Dump all archiver stats.
@@ -897,10 +784,11 @@ print_pgstatarchiver()
 	/* check and deal with errors */
 	if (!res || PQresultStatus(res) > 2)
 	{
-		warnx("pgstat: query failed: %s", PQerrorMessage(conn));
+		pg_log_warning("query failed: %s", PQerrorMessage(conn));
 		PQclear(res);
 		PQfinish(conn);
-		errx(1, "pgstat: query was: %s", sql);
+		pg_log_error("query was: %s", sql);
+		exit(EXIT_FAILURE);
 	}
 
 	/* get the number of fields */
@@ -979,10 +867,11 @@ print_pgstatbgwriter()
 	/* check and deal with errors */
 	if (!res || PQresultStatus(res) > 2)
 	{
-		warnx("pgstat: query failed: %s", PQerrorMessage(conn));
+		pg_log_warning("query failed: %s", PQerrorMessage(conn));
 		PQclear(res);
 		PQfinish(conn);
-		errx(1, "pgstat: query was: %s", sql);
+		pg_log_error("query was: %s", sql);
+		exit(EXIT_FAILURE);
 	}
 
 	/* get the number of fields */
@@ -1108,10 +997,11 @@ print_pgstatconnection()
 	/* check and deal with errors */
 	if (!res || PQresultStatus(res) > 2)
 	{
-		warnx("pgstat: query failed: %s", PQerrorMessage(conn));
+		pg_log_warning("query failed: %s", PQerrorMessage(conn));
 		PQclear(res);
 		PQfinish(conn);
-		errx(1, "pgstat: query was: %s", sql);
+		pg_log_error("query was: %s", sql);
+		exit(EXIT_FAILURE);
 	}
 
 	/* get the number of fields */
@@ -1146,7 +1036,7 @@ print_pgstatdatabase()
 {
 	char		sql[PGSTAT_DEFAULT_STRING_SIZE];
 	PGresult   *res;
-    const char *paramValues[1];
+    	const char *paramValues[1];
 	int			nrows;
 	int			row, column;
 
@@ -1227,10 +1117,11 @@ print_pgstatdatabase()
 	/* check and deal with errors */
 	if (!res || PQresultStatus(res) > 2)
 	{
-		warnx("pgstat: query failed: %s", PQerrorMessage(conn));
+		pg_log_warning("query failed: %s", PQerrorMessage(conn));
 		PQclear(res);
 		PQfinish(conn);
-		errx(1, "pgstat: query was: %s", sql);
+		pg_log_error("query was: %s", sql);
+		exit(EXIT_FAILURE);
 	}
 
 	/* get the number of fields */
@@ -1436,10 +1327,11 @@ print_pgstattable()
 	/* check and deal with errors */
 	if (!res || PQresultStatus(res) > 2)
 	{
-		warnx("pgstat: query failed: %s", PQerrorMessage(conn));
+		pg_log_warning("query failed: %s", PQerrorMessage(conn));
 		PQclear(res);
 		PQfinish(conn);
-		errx(1, "pgstat: query was: %s", sql);
+		pg_log_error("query was: %s", sql);
+		exit(EXIT_FAILURE);
 	}
 
 	/* get the number of fields */
@@ -1583,10 +1475,11 @@ print_pgstattableio()
 	/* check and deal with errors */
 	if (!res || PQresultStatus(res) > 2)
 	{
-		warnx("pgstat: query failed: %s", PQerrorMessage(conn));
+		pg_log_warning("query failed: %s", PQerrorMessage(conn));
 		PQclear(res);
 		PQfinish(conn);
-		errx(1, "pgstat: query was: %s", sql);
+		pg_log_error("query was: %s", sql);
+		exit(EXIT_FAILURE);
 	}
 
 	/* get the number of fields */
@@ -1688,10 +1581,11 @@ print_pgstatindex()
 	/* check and deal with errors */
 	if (!res || PQresultStatus(res) > 2)
 	{
-		warnx("pgstat: query failed: %s", PQerrorMessage(conn));
+		pg_log_warning("query failed: %s", PQerrorMessage(conn));
 		PQclear(res);
 		PQfinish(conn);
-		errx(1, "pgstat: query was: %s", sql);
+		pg_log_error("query was: %s", sql);
+		exit(EXIT_FAILURE);
 	}
 
 	/* get the number of fields */
@@ -1778,10 +1672,11 @@ print_pgstatfunction()
 	/* check and deal with errors */
 	if (!res || PQresultStatus(res) > 2)
 	{
-		warnx("pgstat: query failed: %s", PQerrorMessage(conn));
+		pg_log_warning("query failed: %s", PQerrorMessage(conn));
 		PQclear(res);
 		PQfinish(conn);
-		errx(1, "pgstat: query was: %s", sql);
+		pg_log_error("query was: %s", sql);
+		exit(EXIT_FAILURE);
 	}
 
 	/* get the number of fields */
@@ -1897,10 +1792,11 @@ print_pgstatstatement()
 	/* check and deal with errors */
 	if (!res || PQresultStatus(res) > 2)
 	{
-		warnx("pgstat: query failed: %s", PQerrorMessage(conn));
+		pg_log_warning("query failed: %s", PQerrorMessage(conn));
 		PQclear(res);
 		PQfinish(conn);
-		errx(1, "pgstat: query was: %s", sql);
+		pg_log_error("query was: %s", sql);
+		exit(EXIT_FAILURE);
 	}
 
 	/* get the number of fields */
@@ -2054,10 +1950,11 @@ print_pgstatslru()
 	/* check and deal with errors */
 	if (!res || PQresultStatus(res) > 2)
 	{
-		warnx("pgstat: query failed: %s", PQerrorMessage(conn));
+		pg_log_warning("query failed: %s", PQerrorMessage(conn));
 		PQclear(res);
 		PQfinish(conn);
-		errx(1, "pgstat: query was: %s", sql);
+		pg_log_error("query was: %s", sql);
+		exit(EXIT_FAILURE);
 	}
 
 	/* get the number of fields */
@@ -2148,10 +2045,11 @@ print_pgstatwal()
 	/* check and deal with errors */
 	if (!res || PQresultStatus(res) > 2)
 	{
-		warnx("pgstat: query failed: %s", PQerrorMessage(conn));
+		pg_log_warning("query failed: %s", PQerrorMessage(conn));
 		PQclear(res);
 		PQfinish(conn);
-		errx(1, "pgstat: query was: %s", sql);
+		pg_log_error("query was: %s", sql);
+		exit(EXIT_FAILURE);
 	}
 
 	/* get the number of fields */
@@ -2241,10 +2139,11 @@ print_pgstatprogressbasebackup()
 	/* check and deal with errors */
 	if (!res || PQresultStatus(res) > 2)
 	{
-		warnx("pgstat: query failed: %s", PQerrorMessage(conn));
+		pg_log_warning("query failed: %s", PQerrorMessage(conn));
 		PQclear(res);
 		PQfinish(conn);
-		errx(1, "pgstat: query was: %s", sql);
+		pg_log_error("query was: %s", sql);
+		exit(EXIT_FAILURE);
 	}
 
 	/* get the number of fields */
@@ -2304,10 +2203,11 @@ print_pgstatprogressanalyze()
 	/* check and deal with errors */
 	if (!res || PQresultStatus(res) > 2)
 	{
-		warnx("pgstat: query failed: %s", PQerrorMessage(conn));
+		pg_log_warning("query failed: %s", PQerrorMessage(conn));
 		PQclear(res);
 		PQfinish(conn);
-		errx(1, "pgstat: query was: %s", sql);
+		pg_log_error("query was: %s", sql);
+		exit(EXIT_FAILURE);
 	}
 
 	/* get the number of fields */
@@ -2362,10 +2262,11 @@ print_pgstatprogresscluster()
 	/* check and deal with errors */
 	if (!res || PQresultStatus(res) > 2)
 	{
-		warnx("pgstat: query failed: %s", PQerrorMessage(conn));
+		pg_log_warning("query failed: %s", PQerrorMessage(conn));
 		PQclear(res);
 		PQfinish(conn);
-		errx(1, "pgstat: query was: %s", sql);
+		pg_log_error("query was: %s", sql);
+		exit(EXIT_FAILURE);
 	}
 
 	/* get the number of fields */
@@ -2419,10 +2320,11 @@ print_pgstatprogresscopy()
 	/* check and deal with errors */
 	if (!res || PQresultStatus(res) > 2)
 	{
-		warnx("pgstat: query failed: %s", PQerrorMessage(conn));
+		pg_log_warning("query failed: %s", PQerrorMessage(conn));
 		PQclear(res);
 		PQfinish(conn);
-		errx(1, "pgstat: query was: %s", sql);
+		pg_log_error("query was: %s", sql);
+		exit(EXIT_FAILURE);
 	}
 
 	/* get the number of fields */
@@ -2479,10 +2381,11 @@ print_pgstatprogresscreateindex()
 	/* check and deal with errors */
 	if (!res || PQresultStatus(res) > 2)
 	{
-		warnx("pgstat: query failed: %s", PQerrorMessage(conn));
+		pg_log_warning("query failed: %s", PQerrorMessage(conn));
 		PQclear(res);
 		PQfinish(conn);
-		errx(1, "pgstat: query was: %s", sql);
+		pg_log_error("query was: %s", sql);
+		exit(EXIT_FAILURE);
 	}
 
 	/* get the number of fields */
@@ -2540,10 +2443,11 @@ print_pgstatprogressvacuum()
 	/* check and deal with errors */
 	if (!res || PQresultStatus(res) > 2)
 	{
-		warnx("pgstat: query failed: %s", PQerrorMessage(conn));
+		pg_log_warning("query failed: %s", PQerrorMessage(conn));
 		PQclear(res);
 		PQfinish(conn);
-		errx(1, "pgstat: query was: %s", sql);
+		pg_log_error("query was: %s", sql);
+		exit(EXIT_FAILURE);
 	}
 
 	/* get the number of fields */
@@ -2600,10 +2504,11 @@ print_buffercache()
 	/* check and deal with errors */
 	if (!res || PQresultStatus(res) > 2)
 	{
-		warnx("pgstat: query failed: %s", PQerrorMessage(conn));
+		pg_log_warning("query failed: %s", PQerrorMessage(conn));
 		PQclear(res);
 		PQfinish(conn);
-		errx(1, "pgstat: query was: %s", sql);
+		pg_log_error("query was: %s", sql);
+		exit(EXIT_FAILURE);
 	}
 
 	/* get the number of fields */
@@ -2670,10 +2575,11 @@ print_xlogstats()
 	/* check and deal with errors */
 	if (!res || PQresultStatus(res) > 2)
 	{
-		warnx("pgstat: query failed: %s", PQerrorMessage(conn));
+		pg_log_warning("query failed: %s", PQerrorMessage(conn));
 		PQclear(res);
 		PQfinish(conn);
-		errx(1, "pgstat: query was: %s", sql);
+		pg_log_error("query was: %s", sql);
+		exit(EXIT_FAILURE);
 	}
 
 	xlogfilename = pg_strdup(PQgetvalue(res, 0, 0));
@@ -2732,19 +2638,20 @@ print_repslotsstats()
 
 	if (!res || PQntuples(res) == 0)
 	{
-		warnx("pgstat: No results, meaning no replicaton slot");
 		PQclear(res);
 		PQfinish(conn);
-		errx(1, "pgstat: exiting");
+		pg_log_error("No results, meaning no replicaton slot");
+		exit(EXIT_FAILURE);
 	}
 
 	/* check and deal with errors */
 	if (!res || PQresultStatus(res) > 2)
 	{
-		warnx("pgstat: query failed: %s", PQerrorMessage(conn));
+		pg_log_warning("query failed: %s", PQerrorMessage(conn));
 		PQclear(res);
 		PQfinish(conn);
-		errx(1, "pgstat: query was: %s", sql);
+		pg_log_error("query was: %s", sql);
+		exit(EXIT_FAILURE);
 	}
 
 	xlogfilename = pg_strdup(PQgetvalue(res, 0, 0));
@@ -2853,10 +2760,11 @@ print_tempfilestats()
 	/* check and deal with errors */
 	if (!res || PQresultStatus(res) > 2)
 	{
-		warnx("pgstat: query failed: %s", PQerrorMessage(conn));
+		pg_log_warning("query failed: %s", PQerrorMessage(conn));
 		PQclear(res);
 		PQfinish(conn);
-		errx(1, "pgstat: query was: %s", sql);
+		pg_log_error("query was: %s", sql);
+		exit(EXIT_FAILURE);
 	}
 
 	/* get the number of fields */
@@ -2910,10 +2818,11 @@ print_pgstatwaitevent()
 	/* check and deal with errors */
 	if (!res || PQresultStatus(res) > 2)
 	{
-		warnx("pgstat: query failed: %s", PQerrorMessage(conn));
+		pg_log_warning("query failed: %s", PQerrorMessage(conn));
 		PQclear(res);
 		PQfinish(conn);
-		errx(1, "pgstat: query was: %s", sql);
+		pg_log_error("query was: %s", sql);
+		exit(EXIT_FAILURE);
 	}
 
 	/* get the number of fields */
@@ -2971,10 +2880,11 @@ print_pgbouncerpools()
 	/* check and deal with errors */
 	if (!res || PQresultStatus(res) > 2)
 	{
-		warnx("pgstat: query failed: %s", PQerrorMessage(conn));
+		pg_log_warning("query failed: %s", PQerrorMessage(conn));
 		PQclear(res);
 		PQfinish(conn);
-		errx(1, "pgstat: query was: %s", sql);
+		pg_log_error("query was: %s", sql);
+		exit(EXIT_FAILURE);
 	}
 
 	/* get the number of fields */
@@ -3040,10 +2950,11 @@ print_pgbouncerstats()
 	/* check and deal with errors */
 	if (!res || PQresultStatus(res) > 2)
 	{
-		warnx("pgstat: query failed: %s", PQerrorMessage(conn));
+		pg_log_warning("query failed: %s", PQerrorMessage(conn));
 		PQclear(res);
 		PQfinish(conn);
-		errx(1, "pgstat: query was: %s", sql);
+		pg_log_error("query was: %s", sql);
+		exit(EXIT_FAILURE);
 	}
 
 	/* get the number of fields */
@@ -3100,10 +3011,11 @@ fetch_version()
 	/* check and deal with errors */
 	if (!res || PQresultStatus(res) > 2)
 	{
-		warnx("pgstat: query failed: %s", PQerrorMessage(conn));
+		pg_log_warning("query failed: %s", PQerrorMessage(conn));
 		PQclear(res);
 		PQfinish(conn);
-		errx(1, "pgstat: query was: %s", sql);
+		pg_log_error("query was: %s", sql);
+		exit(EXIT_FAILURE);
 	}
 
 	/* get the only row, and parse it to get major and minor numbers */
@@ -3136,10 +3048,11 @@ char
 	/* check and deal with errors */
 	if (!res || PQresultStatus(res) > 2)
 	{
-		warnx("pgstat: query failed: %s", PQerrorMessage(conn));
+		pg_log_warning("query failed: %s", PQerrorMessage(conn));
 		PQclear(res);
 		PQfinish(conn);
-		errx(1, "pgstat: query was: %s", sql);
+		pg_log_error("query was: %s", sql);
+		exit(EXIT_FAILURE);
 	}
 
 	/* get the only row as the setting value */
@@ -3184,10 +3097,11 @@ fetch_pgbuffercache_namespace()
 	/* check and deal with errors */
 	if (!res || PQresultStatus(res) > 2)
 	{
-		warnx("pgstat: query failed: %s", PQerrorMessage(conn));
+		pg_log_warning("query failed: %s", PQerrorMessage(conn));
 		PQclear(res);
 		PQfinish(conn);
-		errx(1, "pgstat: query was: %s", sql);
+		pg_log_error("query was: %s", sql);
+		exit(EXIT_FAILURE);
 	}
 
 	if (PQntuples(res) > 0)
@@ -3233,10 +3147,11 @@ fetch_pgstatstatements_namespace()
 	/* check and deal with errors */
 	if (!res || PQresultStatus(res) > 2)
 	{
-		warnx("pgstat: query failed: %s", PQerrorMessage(conn));
+		pg_log_warning("query failed: %s", PQerrorMessage(conn));
 		PQclear(res);
 		PQfinish(conn);
-		errx(1, "pgstat: query was: %s", sql);
+		pg_log_error("query was: %s", sql);
+		exit(EXIT_FAILURE);
 	}
 
 	if (PQntuples(res) > 0)
@@ -3671,7 +3586,7 @@ doresize(void)
 		if (status == -1 && errno == EINTR)
 			continue;
 		else if (status == -1)
-			errx(1, "ioctl");
+			pg_log_error("ioctl");
 		if (w.ws_row > 3)
 			winlines = w.ws_row - 3;
 		else
@@ -3693,7 +3608,7 @@ static void
 quit_properly(SIGNAL_ARGS)
 {
 	PQfinish(conn);
-	exit(1);
+	exit(EXIT_FAILURE);
 }
 
 /*
@@ -3702,6 +3617,9 @@ quit_properly(SIGNAL_ARGS)
 int
 main(int argc, char **argv)
 {
+	const char  *progname;
+	ConnParams   cparams;
+
 	/*
 	 * If the user stops the program (control-Z) and then resumes it,
 	 * print out the header again.
@@ -3723,14 +3641,28 @@ main(int argc, char **argv)
 		winlines = PGSTAT_DEFAULT_LINES;
 	}
 
+	/* Initialize the logging interface */
+	pg_logging_init(argv[0]);
+
+	/* Get the program name */
+        progname = get_progname(argv[0]);
+
 	/* Allocate the options struct */
 	opts = (struct options *) pg_malloc(sizeof(struct options));
 
 	/* Parse the options */
 	get_opts(argc, argv);
 
+	/* Set the connection struct */
+        cparams.pghost = opts->hostname;
+	cparams.pgport = opts->port;
+	cparams.pguser = opts->username;
+	cparams.dbname = opts->dbname;
+	cparams.prompt_password = TRI_DEFAULT;
+	cparams.override_dbname = NULL;
+
 	/* Connect to the database */
-	conn = sql_conn();
+	conn = connectDatabase(&cparams, progname, false, false, false);
 
 	/* Get PostgreSQL version
 	 * (if we are not connected to the pseudo pgBouncer database)
@@ -3750,38 +3682,44 @@ main(int argc, char **argv)
 	if ((opts->stat == CONNECTION || opts->stat == XLOG) && !backend_minimum_version(9, 2))
 	{
 		PQfinish(conn);
-		errx(1, "You need at least v9.2 for this statistic.");
+		pg_log_error("You need at least v9.2 for this statistic.");
+		exit(EXIT_FAILURE);
 	}
 
 	if (opts->stat == ARCHIVER && !backend_minimum_version(9, 4))
 	{
 		PQfinish(conn);
-		errx(1, "You need at least v9.4 for this statistic.");
+		pg_log_error("You need at least v9.4 for this statistic.");
+		exit(EXIT_FAILURE);
 	}
 
 	if ((opts->stat == PROGRESS_VACUUM || opts->stat == WAITEVENT) && !backend_minimum_version(9, 6))
 	{
 		PQfinish(conn);
-		errx(1, "You need at least v9.6 for this statistic.");
+		pg_log_error("You need at least v9.6 for this statistic.");
+		exit(EXIT_FAILURE);
 	}
 
 	if ((opts->stat == PROGRESS_CREATEINDEX || opts->stat == PROGRESS_CLUSTER) && !backend_minimum_version(12, 0))
 	{
 		PQfinish(conn);
-		errx(1, "You need at least v12 for this statistic.");
+		pg_log_error("You need at least v12 for this statistic.");
+		exit(EXIT_FAILURE);
 	}
 
 	if ((opts->stat == PROGRESS_ANALYZE || opts->stat == PROGRESS_BASEBACKUP|| opts->stat == SLRU)
 		&& !backend_minimum_version(13, 0))
 	{
 		PQfinish(conn);
-		errx(1, "You need at least v13 for this statistic.");
+		pg_log_error("You need at least v13 for this statistic.");
+		exit(EXIT_FAILURE);
 	}
 
 	if ((opts->stat == WAL || opts->stat == PROGRESS_COPY) && !backend_minimum_version(14, 0))
 	{
 		PQfinish(conn);
-		errx(1, "You need at least v14 for this statistic.");
+		pg_log_error("You need at least v14 for this statistic.");
+		exit(EXIT_FAILURE);
 	}
 
 	/* Check if the configuration matches the statistics */
@@ -3790,7 +3728,8 @@ main(int argc, char **argv)
 		if (strcmp(fetch_setting("track_functions"), "none") == 0)
 		{
 			PQfinish(conn);
-			errx(1, "track_functions is set to \"none\".");
+			pg_log_error("track_functions is set to \"none\".");
+			exit(EXIT_FAILURE);
 		}
 	}
 
@@ -3800,7 +3739,8 @@ main(int argc, char **argv)
 		if (!opts->namespace)
 		{
 			PQfinish(conn);
-			errx(1, "Cannot find the pg_stat_statements extension.");
+			pg_log_error("Cannot find the pg_stat_statements extension.");
+			exit(EXIT_FAILURE);
 		}
 	}
 
@@ -3810,7 +3750,8 @@ main(int argc, char **argv)
 		if (!opts->namespace)
 		{
 			PQfinish(conn);
-			errx(1, "Cannot find the pg_buffercache extension.");
+			pg_log_error("Cannot find the pg_buffercache extension.");
+			exit(EXIT_FAILURE);
 		}
 	}
 
@@ -3818,7 +3759,8 @@ main(int argc, char **argv)
 	if (opts->stat == REPSLOTS && !opts->filter)
 	{
 		PQfinish(conn);
-		errx(1, "You need to specify a replication slot with -f for this statistic.");
+		pg_log_error("You need to specify a replication slot with -f for this statistic.");
+		exit(EXIT_FAILURE);
 	}
 
 
